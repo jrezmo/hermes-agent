@@ -51,30 +51,6 @@ from hermes_cli.config import get_hermes_home
 logger = logging.getLogger(__name__)
 
 
-def _get_terminal_dimensions() -> tuple[int, int]:
-    """Get terminal dimensions from environment or system, with sensible defaults.
-
-    Priority:
-    1. COLUMNS/LINES environment variables (user-set or propagated from PTY)
-    2. shutil.get_terminal_size() (actual terminal dimensions)
-    3. (30, 120) fallback for headless environments
-    """
-    try:
-        cols = int(os.environ.get("COLUMNS", 0))
-        rows = int(os.environ.get("LINES", 0))
-        if cols > 0 and rows > 0:
-            return (rows, cols)
-    except ValueError:
-        pass
-    try:
-        size = shutil.get_terminal_size()
-        if size.lines > 0 and size.columns > 0:
-            return (size.lines, size.columns)
-    except OSError:
-        pass
-    return (30, 120)
-
-
 # Checkpoint file for crash recovery (gateway only)
 CHECKPOINT_PATH = get_hermes_home() / "processes.json"
 
@@ -221,6 +197,31 @@ class ProcessRegistry:
                 logger.debug("Could not resolve environment temp dir: %s", exc)
         return "/tmp"
 
+    @staticmethod
+    def _get_terminal_dimensions() -> tuple[int, int]:
+        """Best-effort PTY size as (rows, columns)."""
+
+        def _parse_positive_int(value: Optional[str]) -> Optional[int]:
+            try:
+                parsed = int(str(value))
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed > 0 else None
+
+        env_columns = _parse_positive_int(os.environ.get("COLUMNS"))
+        env_lines = _parse_positive_int(os.environ.get("LINES"))
+        if env_columns and env_lines:
+            return (env_lines, env_columns)
+
+        try:
+            size = shutil.get_terminal_size()
+            if size.columns > 0 and size.lines > 0:
+                return (size.lines, size.columns)
+        except OSError:
+            pass
+
+        return (30, 120)
+
     def spawn_local(
         self,
         command: str,
@@ -259,14 +260,14 @@ class ProcessRegistry:
                 user_shell = _find_shell()
                 pty_env = _sanitize_subprocess_env(os.environ, env_vars)
                 pty_env["PYTHONUNBUFFERED"] = "1"
-                rows, cols = _get_terminal_dimensions()
-                pty_env["COLUMNS"] = str(cols)
+                rows, columns = self._get_terminal_dimensions()
                 pty_env["LINES"] = str(rows)
+                pty_env["COLUMNS"] = str(columns)
                 pty_proc = _PtyProcessCls.spawn(
                     [user_shell, "-lic", command],
                     cwd=session.cwd,
                     env=pty_env,
-                    dimensions=(rows, cols),
+                    dimensions=(rows, columns),
                 )
                 session.pid = pty_proc.pid
                 # Store the pty handle on the session for read/write
